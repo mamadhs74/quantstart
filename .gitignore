@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.parquet
+*.csv
+*.zip
+.cache/
+data/
+results/
+*.png
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
