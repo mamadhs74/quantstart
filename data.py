@@ -59,16 +59,32 @@ def _parse_zip(content: bytes) -> pd.DataFrame:
     return df.set_index("open_time").astype(float)
 
 
-def _fetch(url: str, cached: Path) -> pd.DataFrame | None:
-    """Download once, then read from disk forever. Published files never change."""
+def _fetch(url: str, cached: Path, allow_negative: bool = False) -> pd.DataFrame | None:
+    """
+    Download once, then read from disk forever. Published files never change.
+
+    allow_negative: also remember that a file does NOT exist, so we stop
+    re-requesting it. Only safe for days old enough that publication is
+    certain -- a recent 404 may just mean 'not published yet'.
+    """
     if cached.exists():
         return pd.read_parquet(cached)
+
+    missing = cached.with_suffix(".missing")
+    if allow_negative and missing.exists():
+        return None
+
     try:
         resp = requests.get(url, timeout=60)
     except requests.RequestException:
         return None
+
     if resp.status_code == 404:
-        return None          # not published: before listing, or not yet closed
+        if allow_negative:
+            missing.parent.mkdir(parents=True, exist_ok=True)
+            missing.touch()
+        return None
+
     resp.raise_for_status()
     df = _parse_zip(resp.content)
     cached.parent.mkdir(parents=True, exist_ok=True)
@@ -83,10 +99,12 @@ def _fetch_month(symbol: str, interval: str, month: str) -> pd.DataFrame | None:
     )
 
 
-def _fetch_day(symbol: str, interval: str, day: str) -> pd.DataFrame | None:
+def _fetch_day(symbol: str, interval: str, day: str,
+               allow_negative: bool = False) -> pd.DataFrame | None:
     return _fetch(
         f"{BASE_DAILY}/{symbol}/{interval}/{symbol}-{interval}-{day}.zip",
         CACHE / symbol / interval / "daily" / f"{day}.parquet",
+        allow_negative=allow_negative,
     )
 
 
@@ -117,7 +135,13 @@ def load_klines(
     if include_tail:
         today = date.today()
         for i in range(TAIL_DAYS, 0, -1):
-            part = _fetch_day(symbol, interval, str(today - timedelta(days=i)))
+            day = today - timedelta(days=i)
+            # A day more than 3 days old that is still missing will never
+            # appear -- the symbol was delisted or never traded then. Cache
+            # that fact. Recent misses stay uncached so they get retried.
+            certain = i > 3
+            part = _fetch_day(symbol, interval, str(day),
+                              allow_negative=certain)
             if part is not None:
                 frames.append(part)
 
