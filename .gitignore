@@ -18,3 +18,4 @@ paper_log.csv
 paper_meta.json
 engine_state.json
 engine_audit.jsonl
+engine_task.log

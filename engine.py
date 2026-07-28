@@ -254,6 +254,15 @@ def main() -> None:
     raw_target = weights.iloc[-1]
     bar = weights.index[-1]
 
+    # Idempotency. A scheduler may fire twice, a run may be repeated manually,
+    # or the machine may wake late and catch up. None of those are new market
+    # data, and recording them as sessions corrupts the live track record.
+    if state.get("last_bar") is not None and str(bar) == str(state["last_bar"]):
+        print(f"\n  Already processed bar {bar.date()}. Nothing to do.")
+        print(f"  {len(state['history'])} sessions recorded.")
+        audit("skipped", reason="duplicate bar", bar=str(bar.date()))
+        return
+
     lev = min(CFG.leverage, CFG.max_leverage)
     target = (raw_target * lev).round(6)
 
