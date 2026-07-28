@@ -82,10 +82,17 @@ def main() -> None:
     meta = _ensure_meta()
     end = datetime.now(timezone.utc).strftime("%Y-%m")
 
-    print("Downloading latest prices...")
-    surv = load_universe(SURVIVORS, "1d", START, end)
-    dead = load_universe(CASUALTIES, "1d", START, end).dropna(axis=1, how="all")
+    print("Downloading latest prices (including daily tail)...")
+    surv = load_universe(SURVIVORS, "1d", START, end, include_tail=True)
+    dead = load_universe(CASUALTIES, "1d", START, end,
+                         include_tail=True).dropna(axis=1, how="all")
     prices = pd.concat([surv, dead], axis=1).sort_index().dropna(how="all")
+
+    age = (pd.Timestamp.now(tz="UTC").normalize() - prices.index[-1]).days
+    print(f"  Latest bar: {prices.index[-1].date()} ({age} days old)")
+    if age > 4:
+        print("  WARNING: data is stale. Binance publishes daily archives with")
+        print("  a lag, but more than a few days means something is wrong.")
 
     weights = cross_sectional_momentum(prices, **PARAMS)
     latest = weights.iloc[-1]
