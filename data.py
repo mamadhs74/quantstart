@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -43,6 +44,10 @@ _COLS = [
 # How many trailing days to try from daily archives. 45 comfortably covers the
 # gap left by an unpublished current month plus the publication lag.
 TAIL_DAYS = 45
+
+# Concurrent downloads. These are I/O-bound, so threads are the right tool.
+# Keep it modest -- this is a free public endpoint, not something to hammer.
+MAX_WORKERS = 12
 
 
 def _parse_zip(content: bytes) -> pd.DataFrame:
@@ -126,24 +131,32 @@ def load_klines(
     frame reaches up to yesterday instead of the last closed month. Use it for
     live signals; leave it off for reproducible backtests.
     """
+    months = [str(m) for m in pd.period_range(start=start, end=end, freq="M")]
     frames = []
-    for month in pd.period_range(start=start, end=end, freq="M"):
-        part = _fetch_month(symbol, interval, str(month))
-        if part is not None:
-            frames.append(part)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = [pool.submit(_fetch_month, symbol, interval, m) for m in months]
+        for fut in as_completed(futures):
+            part = fut.result()
+            if part is not None:
+                frames.append(part)
 
     if include_tail:
         today = date.today()
-        for i in range(TAIL_DAYS, 0, -1):
-            day = today - timedelta(days=i)
-            # A day more than 3 days old that is still missing will never
-            # appear -- the symbol was delisted or never traded then. Cache
-            # that fact. Recent misses stay uncached so they get retried.
-            certain = i > 3
-            part = _fetch_day(symbol, interval, str(day),
-                              allow_negative=certain)
-            if part is not None:
-                frames.append(part)
+        # A day more than 3 days old that is still missing will never appear --
+        # the symbol was delisted or was not trading then. Cache that fact.
+        # Recent misses stay uncached so they get retried tomorrow.
+        jobs = [(str(today - timedelta(days=i)), i > 3)
+                for i in range(TAIL_DAYS, 0, -1)]
+
+        # These are I/O-bound HTTPS round trips. Done sequentially, 45 days
+        # across 25 symbols takes ~10 minutes. In parallel it takes seconds.
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = [pool.submit(_fetch_day, symbol, interval, day, neg)
+                       for day, neg in jobs]
+            for fut in as_completed(futures):
+                part = fut.result()
+                if part is not None:
+                    frames.append(part)
 
     if not frames:
         raise RuntimeError(f"No data returned for {symbol} {interval}")
