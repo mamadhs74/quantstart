@@ -1,93 +1,162 @@
 # quantstart
 
-A backtesting engine built to be hard to fool, plus a free-data loader that
-needs no account of any kind.
+A systematic trading research pipeline built to be hard to fool.
 
-This is the piece of infrastructure every trading idea has to pass through.
-Build it first, trust it, and then it will tell you the truth about every
-strategy you try afterwards — including the ones you want to be true.
+The point of this repo is not a strategy. It is a **measuring instrument** —
+one that tries honestly to kill every result it produces, and reports the
+numbers that don't support the hypothesis alongside the ones that do.
 
-## Run it right now
+---
+
+## Quick start
 
 ```bash
-pip install pandas numpy scipy requests pyarrow
-python selftest.py
+pip install -r requirements.txt
+python selftest.py        # no network needed
 ```
 
-`selftest.py` needs no network. It runs the whole pipeline on synthetic random
-walks — data with **no exploitable structure by construction** — and checks
-that the engine correctly finds nothing. That is the test almost everyone
-skips, and it is why almost everyone's backtester is silently wrong.
+`selftest.py` runs the full pipeline on synthetic random walks — data with no
+exploitable structure by construction — and verifies the engine correctly
+finds nothing. Run this before trusting any result on real data.
 
 Then, with internet:
 
-```python
-from data import load_universe
-prices = load_universe(["BTCUSDT", "ETHUSDT", "SOLUSDT"], "1d", "2020-01", "2025-12")
+```bash
+python run_real.py            # baselines on 8 crypto pairs
+python analyze_regimes.py     # when does it work?
+python ml_regime.py           # does ML add anything?
+python run_cross_sectional.py # survivorship bias, measured
+python robustness.py          # parameter surface, sub-periods, walk-forward
+python when_did_it_work.py    # rolling relative performance
+python paper_trade.py         # daily live signal log
 ```
 
-## What the self-test demonstrates
+Data is public Binance archives via `data.binance.vision`. No account, no API
+key, no KYC.
 
-Running it on pure noise produces exactly the results it should:
+---
 
-| check | result | reading |
-|---|---|---|
-| Oracle (cheating) | Sharpe **33.4** | the engine *can* see a signal when one exists |
-| Momentum, no costs | Sharpe −0.14 | inside the random-strategy band → no edge, correct |
-| Momentum, 15 bps | Sharpe **−0.52** | costs alone cost 0.38 Sharpe |
-| Deflated Sharpe | **0.001** | correctly says "this is luck" |
+## What was found
 
-That third row is the lesson. Same signal, same data — **transaction costs
-moved the result from flat to badly losing.** At 63× annual turnover, a
-strategy needs a very large gross edge just to break even. Most published
-retail strategies never model this, which is most of why they evaporate live.
+Working through the pipeline on 2019–2025 daily crypto data, 25 assets
+including five that collapsed:
 
-## The three rules the engine enforces for you
+| test | result |
+|---|---|
+| Engine on pure noise | Finds nothing. Deflated Sharpe 0.001. Correct. |
+| Time-series momentum | Sharpe 1.11 vs buy-and-hold 1.33 — **loses** |
+| ...but drawdown | −63.9% vs −79.8% — real risk reduction |
+| ML regime filter (ridge) | Sharpe 0.64 vs 0.91 unfiltered — **hurts** |
+| ML regime filter (boosting) | Sharpe 0.33 — **hurts more** |
+| Cross-sectional momentum | Walk-forward Sharpe 1.50 vs 1.08 — **beats** |
+| Overfitting gap | +0.01 — essentially none |
+| Parameter surface (16 combos) | All positive, CV 0.12 — flat plateau |
+| Sub-periods | Lost to benchmark in 0 of 3 |
+| Rolling 12m windows won | 59.8% |
+| Deflated Sharpe (n_trials=16) | **0.937** — below the 0.95 bar |
 
-1. **No lookahead, structurally.** `backtest.run()` applies `.shift(1)` to your
-   weights itself. Weights computed from bar *t* are held from bar *t+1*. You
-   cannot forget to do this, because you don't do it.
+**Verdict: promising, not proven.** Cross-sectional momentum survives the
+tests that catch parameter overfitting, but does not clear the significance
+bar once the parameter search is honestly accounted for.
+
+Two results worth highlighting because they run against intuition:
+
+**Complexity monotonically hurt.** Buy-and-hold (0 parameters) → momentum
+(6 fixed) → ridge (learned) → gradient boosting (learned, flexible) produced
+Sharpes of 1.23 → 0.91 → 0.64 → 0.33. Every layer of sophistication made
+out-of-sample performance worse. With ~98 effective independent samples, this
+is what should happen.
+
+**Trend following needs losers.** Adding collapsed assets (LUNA −99.9%,
+FTT −99.4%) *improved* momentum's Sharpe by 0.10. Survivorship bias had been
+hiding the assets the signal exists to avoid.
+
+---
+
+## The three rules the engine enforces structurally
+
+1. **No lookahead.** `backtest.run()` applies `.shift(1)` to weights itself.
+   Weights from bar *t* are held from *t+1*. You cannot forget, because you
+   don't do it.
 2. **Costs are mandatory.** `fee_bps` and `slippage_bps` are arguments with
    realistic defaults, not optional extras.
 3. **Trailing statistics only.** Volatility scaling uses rolling windows. No
    full-sample normalisation anywhere.
 
-Plus `walk_forward()` with an **embargo** gap, so overlapping labels can't leak
-information backwards across the train/test boundary.
+Plus `walk_forward()` with an **embargo** gap so overlapping labels cannot
+leak information backwards across the train/test boundary.
 
-## Deflated Sharpe ratio
+---
 
-`n_trials` in `run()` is how many strategy variants you tried before the one
-you're reporting. Be honest about it. Bailey & López de Prado's deflated Sharpe
-then asks: *given that many attempts, and given these fat tails, what's the
-probability this Sharpe is real rather than the best of N coin flips?*
+## Diagnostics that most retail backtests skip
 
-Below ~0.95, it's noise. Most things are noise.
+- **Oracle strategy.** Perfect foresight, deliberately cheating. Establishes
+  the ceiling. Any honest strategy landing near it has a bug, not an edge.
+- **Noise floor.** 30 random-weight strategies. Anything inside that band is
+  not a discovery.
+- **Deflated Sharpe ratio** (Bailey & López de Prado 2014) with `n_trials`
+  set to the true size of the parameter search.
+- **Parameter surface.** A flat plateau across 16 combinations is evidence;
+  a spike at one setting is a warning. *Note: a flat surface rules out
+  parameter artifacts. It says nothing about persistence in time.*
+- **Return concentration.** Remove the best 5/10/20 days. If the result
+  vanishes, you have lucky days rather than a strategy.
+- **Survivorship bias, quantified.** Same tests with and without assets that
+  went to zero.
+- **Rolling relative performance.** Locates exactly when an edge was earned
+  and whether it still is.
 
-## Suggested order of work
+---
 
-1. Run `selftest.py`. Understand every number it prints.
-2. Load real data. Run `oracle()` on it — note the Sharpe. That is the
-   ceiling. Anything honest that lands near it is a bug in your code.
-3. Run `buy_and_hold()`. That is the floor. Beat it or stop.
-4. Run `ts_momentum()`. Compare to both.
-5. Only then build something of your own — and add every variant you try to
-   `n_trials`.
+## Files
 
-## What this will not do
+| file | purpose |
+|---|---|
+| `data.py` | Binance archive loader; monthly for history, daily for the live tail |
+| `backtest.py` | Engine, metrics, deflated Sharpe, walk-forward with embargo |
+| `strategies.py` | Baselines: buy-and-hold, random, momentum, oracle |
+| `selftest.py` | Verifies the engine on synthetic data |
+| `run_real.py` | Baselines on real prices, matched-period comparison |
+| `analyze_regimes.py` | Annual breakdown, up/down months, return concentration |
+| `ml_regime.py` | Ridge and boosting regime filters, purged walk-forward |
+| `run_cross_sectional.py` | Cross-sectional ranking; survivorship bias measured |
+| `robustness.py` | Parameter surface, sub-periods, walk-forward, deflated Sharpe |
+| `when_did_it_work.py` | Rolling relative performance vs benchmark |
+| `paper_trade.py` | Daily signal log with frozen parameters |
 
-It won't make money on its own, and it isn't meant to. It's a measuring
-instrument. Its entire value is that it will tell you when an idea doesn't
-work, before that costs you anything.
+---
 
-The published benchmark for the best trend-following firms in the world is
-roughly **5.3% CAGR with 20% drawdowns**. Any backtest here that beats that by
-a wide margin is almost certainly wrong, and this engine exists to help you
-find out how.
+## Current status
+
+Backtesting is **exhausted**. The deflated Sharpe of 0.937 cannot be improved
+by further testing — every additional variant raises `n_trials` and pushes the
+number *down*. The historical data is spent.
+
+The only remaining source of information is time. `paper_trade.py` logs daily
+signals with frozen parameters and scores them against backtest expectations.
+The failure mode to watch is not "live loses money" but "live and backtest
+diverge" — turnover and drawdown diverge before returns do.
+
+---
 
 ## Reading
 
 - Bailey & López de Prado (2014), *The Deflated Sharpe Ratio*
-- López de Prado, *Advances in Financial Machine Learning* — ch. 7 on purged CV
+- Bailey, Borwein, López de Prado & Zhu (2014), *Pseudo-Mathematics and
+  Financial Charlatanism*
+- López de Prado, *Advances in Financial Machine Learning* — ch. 7, purged CV
 - Moskowitz, Ooi & Pedersen (2012), *Time Series Momentum*
-- Jiang, Xu & Liang (2017), *Deep RL for the Financial Portfolio Management Problem*
+- Jiang, Xu & Liang (2017), *Deep RL for the Financial Portfolio Management
+  Problem*
+
+---
+
+## What this repo will not do
+
+Make money on its own. It is an instrument, not a strategy. Its value is that
+it tells you when an idea doesn't work before that discovery costs anything.
+
+For reference, the SG Trend Index — the largest institutional trend-following
+firms in the world — has compounded at roughly 5.3% annually with 20%
+drawdowns. Any backtest that beats that by a wide margin deserves suspicion
+first and celebration much later.
