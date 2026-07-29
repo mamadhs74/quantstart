@@ -5,3 +5,4 @@ requests>=2.31
 pyarrow>=15.0
 matplotlib>=3.8
 scikit-learn>=1.4
+streamlit>=1.30

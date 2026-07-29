@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,48 @@ import pandas as pd
 
 from data import load_universe
 from run_cross_sectional import CASUALTIES, SURVIVORS, cross_sectional_momentum
+
+
+LOG_DIR = Path("logs")
+
+
+class _Tee:
+    """Write to the console and a file at once, flushing as we go."""
+
+    def __init__(self, path: Path):
+        self.file = path.open("a", encoding="utf-8")
+        self.stdout = sys.stdout
+
+    def write(self, text: str) -> int:
+        self.stdout.write(text)
+        self.file.write(text)
+        self.file.flush()
+        return len(text)
+
+    def flush(self) -> None:
+        self.stdout.flush()
+        self.file.flush()
+
+
+@contextmanager
+def logging_to_file():
+    """
+    Python owns its log file: opened here, closed on exit, one per day.
+
+    The earlier design redirected output with `>>` from a batch file, which
+    left cmd.exe holding the handle. When a run hung, the file stayed locked
+    and every subsequent run failed. A process that manages its own log has
+    no such orphan.
+    """
+    LOG_DIR.mkdir(exist_ok=True)
+    path = LOG_DIR / f"engine_{datetime.now(timezone.utc):%Y%m%d}.log"
+    tee = _Tee(path)
+    sys.stdout = tee
+    try:
+        yield path
+    finally:
+        sys.stdout = tee.stdout
+        tee.file.close()
 
 # ============================================================================
 # CONFIGURATION. Change deliberately, never mid-run.
@@ -334,4 +377,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    with logging_to_file() as log_path:
+        print(f"\n--- run started {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC ---")
+        try:
+            main()
+        except Exception:
+            import traceback
+            traceback.print_exc(file=sys.stdout)
+            print("--- run FAILED ---")
+            raise
+        finally:
+            print(f"--- run finished {datetime.now(timezone.utc):%H:%M:%S} UTC ---")
